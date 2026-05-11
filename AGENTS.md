@@ -12,13 +12,28 @@
 
 ## 架構
 
-三個層次：
+四個層次：
 
 | 層次 | 內容 | 撰寫者 |
 | :--- | :--- | :--- |
 | `raw/` | 不可變的原始文件（文章、書籍、章節、筆記、逐字稿、標註、圖片） | 你 |
-| `wiki/` | 結構化的 Markdown 頁面（概念、作者、辯論、綜合、來源筆記、專案） | Agent |
-| `schema` | 本文件（操作指令）、`index.md`（主索引）、`log.md`（變更日誌）、`overview.md`（領域索引） | 你 + Agent |
+| `wiki/` | 結構化的 Markdown 頁面（概念、作者、辯論、綜合、來源筆記、專案、領域索引） | Agent |
+| `schema` | 本文件（操作指令）、`index.md`（主中心）、`domains/*.md`（領域索引）、`log.md`（變更日誌）、`overview.md`（領域摘要） | 你 + Agent |
+| `graph/` | 自動生成的知識圖譜（`graph.json` + `graph.html` + `graph-report.md`） | Agent |
+
+索引採用 **4 層分級設計**，確保查詢成本恆定，不隨頁面數量增長而膨脹：
+
+```
+L0: wiki/index.md           主中心（~2-3K chars）
+    └── 領域集群表 → 指向各領域索引
+
+L1: wiki/domains/{domain}.md  領域索引（~5-15K each）
+    ├── 中醫學、易經、丹道、文學、兵家、道家、命理、科技、財經、經濟、一般
+    └── 列出該領域所有 sources / concepts / entities
+
+L2: wiki/sources/, concepts/, entities/  獨立知識頁面（現有）
+L3: wiki/syntheses/                      跨領域綜合頁面（現有）
+```
 
 ---
 
@@ -40,8 +55,8 @@ wiki/                 # Agent 完全擁有此層
   index.md            # 主索引（集群式組織，見下方「導航設計」）
   log.md              # 僅追加的時序記錄
   overview.md         # 跨領域綜合摘要（動態合成）
-  domains/            # 專業知識領域概覽頁面（中醫學、易經、丹道等）
-  sources/            # 來源筆記：每份原始文件的摘要頁
+  domains/            # 領域索引頁面（由 update_index.py 自動生成，每領域一個檔案）
+  sources/            # 來源筆記：每份原始文件的摘要頁。深度攝入模式下含子目錄（sources/{slug}/）存放章節頁面
   entities/           # 人物、組織、地點、產品、事件
   concepts/           # 觀念、方法、理論、術語
   authors/            # 思想家／作者頁面
@@ -55,8 +70,11 @@ outputs/              # 產出
   handouts/           # 講義
   tables/             # 表格
   reports/            # 自動報告
-    daily/            # 每日跨領域研究摘要
-    finance-swot/     # 每日財經 SWOT 分析（07:00 自動產生）
+    daily/               # 每日跨領域研究摘要
+    finance-swot/        # 每日財經 SWOT 分析（07:00 自動產生）
+    stock-recommendations/  # 每日股票推薦 + 週末策略回顧
+    qimen-market/        # 每日奇門遁甲市場評估
+    post-market/         # 每日收盤後更新（收盤價 + 消息面校正）
 conversations/        # 對話記錄存檔
 archive/              # 歸檔
 graph/                # 自動生成的圖譜資料
@@ -83,8 +101,10 @@ src/                  # 獨立 Python 腳本
   factcheck.py        # 事實核查 pipeline：wiki + web + qwen3
   maintain.py         # 定時維護腳本
   daemon.py           # 背景守護行程
-  scrape_finance.py   # 每日財經新聞爬蟲（每小時）及 SWOT 分析（每日07:00）
+  scrape_finance.py   # 每日財經新聞爬蟲（每小時）+ SWOT 分析 + 股票推薦（馬爾可夫鏈 + 張量運算）+ 奇門遁甲驗證
   scrape_daily.py     # 每日跨領域研究文獻收集（摘要報告）
+  qimen.py            # 奇門遁甲排盤與金融解讀模組（干支曆法、陰陽遁、九宮排盤）
+  stock_analysis.py   # 股票分析模組（馬爾可夫鏈 + 張量運算 + 技術指標評分）
   tools/              # 工具腳本（refinement_loop, update_index, heal, pdf2md, verify, clean_raw 等）
 ```
 
@@ -105,10 +125,13 @@ context = step3_output(context)
 
 | 檔案 | Pipeline 步驟 |
 |------|--------------|
-| `ingest.py` | parse → convert → read → build_prompt → call_llm → write_pages → update_metadata → validate → report |
+| `ingest.py` | parse → convert → read → split → L1_master → L2_sections → L3_synthesis → write_all → update_metadata → validate → report<br>**上下文載入**：讀取 `index.md`（L0 主中心）→ 偵測來源領域 → 載入 `domains/{domain}.md`（L1 領域索引）→ 載入最近來源頁面 |
 | `query.py` | read_index → identify_cluster → read_synthesis → find_pages → refine_query → search_web → search_images → assemble_sources → generate_answer → extract_claims → factcheck_claims → print → save |
 | `lint.py` | check_orphans → check_broken_links → check_contradictions → check_stale → check_missing_entities → check_link_density → check_images → check_unverified → check_weak_sources → graph_checks → semantic_lint → compose_report |
 | `build_graph.py` | extract_wikilinks → infer_relationships → detect_communities → save_graph → save_html → generate_report |
+| `scrape_finance.py` | scrape_headlines → dedup → fetch_content → save → swot_analysis → (extract_news_signals → post_market_update) → qimen_analysis → stock_recommendations → (weekend_review) |
+| `qimen.py` | calculate_ganzhi → determine_solar_term → get_yin_yang_dun → pai_pan → analyze_finance |
+| `stock_analysis.py` | fetch_stock_data → build_markov_chain → build_tensor_analysis → compute_technical_score → generate_recommendation |
 
 ---
 
@@ -248,47 +271,48 @@ last_updated: YYYY-MM-DD
 
 ## 導航設計
 
-約 10 個來源和 50 多個頁面後，扁平的字母順序索引會變得難以瀏覽。系統使用三層導航串聯，在維基增長時保持查詢成本恆定：
+約 10 個來源和 50 多個頁面後，扁平的字母順序索引會變得難以瀏覽。系統使用**四層索引串聯**，在維基增長時保持查詢成本恆定：
 
-### 1. 概念集群
+### 1. 主中心（`wiki/index.md` — L0）
 
-`wiki/index.md` 將概念組織成主題集群（每個領域 4 到 6 個），而非一個扁平列表。每個集群都有一句話描述、其核心頁面、指向任何綜合頁面的指針，以及關鍵作者。查詢時會先識別相關的集群。
+`wiki/index.md` 不再是扁平列表，而是緊湊的領域樞紐。僅包含：
+- 摘要段落
+- 領域集群表（領域名 → `domains/{domain}.md` + 核心頁面）
+- 跨領域概念集群（簡述）
 
-範例格式：
+大小控制在 2–3K chars，永遠適合 LLM 上下文視窗。
+
+### 2. 領域索引（`wiki/domains/{domain}.md` — L1）
+
+每個領域有獨立的索引頁面，列出該領域內所有 sources / concepts / entities / syntheses。範例：
 ```markdown
-# Wiki Index
+# 中醫學 — Domain Index
 
-## Overview
-- [Overview](overview.md) — 跨領域綜合摘要
-
-## Concept Clusters
-
-### 中醫基礎理論
-核心頁面：[陰陽](concepts/陰陽.md) [五行](concepts/五行.md) [臟腑](concepts/臟腑.md)
-綜合頁面：[中醫基礎理論綜述](syntheses/中醫基礎理論.md)
-關鍵作者：[張仲景](authors/張仲景.md) [李時珍](authors/李時珍.md)
-
-### 易經哲學
-核心頁面：[六十四卦](concepts/六十四卦.md) [卦象](concepts/卦象.md)
-綜合頁面：無（來源不足）
-關鍵作者：[孔子](authors/孔子.md)
-
-## Sources
+## Sources (42)
+- [黃帝內經](sources/huangdi-neijing.md) — 中醫理論體系奠基經典
+- [金匱要略](sources/jin-gui-yao-lue-fang-lun.md) — 張仲景雜病論治
 ...
 
-## Entities
+## Concepts (98)
+- [陰陽](concepts/陰陽.md) — 對立統一的哲學觀念，中醫基礎理論核心
+...
+
+## Entities (46)
+- [張仲景](entities/張仲景.md) — 東漢醫學家，傷寒雜病論作者
 ...
 ```
 
-### 2. 綜合頁面（`wiki/syntheses/`）
+查詢時先識別領域，再載入該領域索引搜尋相關頁面。每個領域索引約 5–15K chars，單獨載入適合上下文視窗。
+
+### 3. 綜合頁面（`wiki/syntheses/` — L3）
 
 綜合頁面是維基的「深層溝槽」：跨越一組相關頁面的、預先消化的論證性概述。當某個集群存在綜合頁面時，查詢會先讀取它——一個頁面代替六個。
 
-### 3. `related:` YAML 欄位
+### 4. `related:` YAML 欄位
 
 每個概念和作者頁面都帶有 `related:` frontmatter 欄位，列出 3 到 5 個最接近的鄰居。閱讀完一個頁面後，Agent 使用 `related:` 導航到下一個最相關的頁面，無需重新掃描索引。
 
-**串聯流程：** 集群 → 綜合 → 相關欄位 → 獨立頁面。
+**串聯流程：** 主中心 → 領域索引 → 綜合 → 相關欄位 → 獨立頁面。
 
 ---
 
@@ -328,7 +352,7 @@ last_updated: YYYY-MM-DD
 
 | 模型 | 位置 | 上下文 | 輸出上限 | 觸發方式 |
 |------|------|--------|---------|---------|
-| qwen3 (llama.cpp) | `http://10.8.0.4:8080` | 32K tokens | 32K | 預設 |
+| qwen3 (llama.cpp) | `http://127.0.0.1:8080` | 32K tokens | 32K | 預設 |
 | DeepSeek v4 flash | `https://api.deepseek.com` | **1M tokens** | **384K** | `--flash` 或自動（prompt > 32K / qwen3 無回應） |
 
 **自動升級**：當 prompt 超過 qwen3 的 32K 限制，或 qwen3 伺服器無回應時，自動切換至 DeepSeek flash。
@@ -349,6 +373,8 @@ last_updated: YYYY-MM-DD
 | 🏛️ 道家 | 經典引用、哲學概念、學派對比 | 提取哲學主張、關鍵原文 | 檢查概念定義、原文引用 |
 | 🔮 命理 | 命盤分析、星曜特性、案例說明 | 提取命理規則、星曜屬性 | 檢查術語、判斷邏輯 |
 | 🎬 娛樂 | 基本資料、近期動態、可靠來源 | 提取藝人經歷、作品 | 檢查資訊正確性 |
+| 🤖 科技 | 技術名稱、版本號、協議規範 | 提取技術架構、系統設計 | 檢查技術術語準確性 |
+| 💰 經濟 | 經濟指標、政策背景、數據來源 | 提取經濟數據、產業趨勢 | 檢查數據可驗證性 |
 
 查詢時自動偵測問題所屬領域，注入對應的領域優化提示詞。
 
@@ -358,16 +384,49 @@ last_updated: YYYY-MM-DD
 
 觸發方式：`ingest <file>` 或 `python src/ingest.py <file>`
 
-**支援格式**：`.md` 直接讀取。非 markdown 檔案（`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`, `.txt`, `.csv`, `.json`, `.xml`, `.rst`, `.rtf`, `.epub`, `.ipynb`, `.yaml`, `.yml`, `.tsv`）會透過 [markitdown](https://github.com/microsoft/markitdown) 自動轉為 markdown 再處理。使用 `--no-convert` 可跳過自動轉換。
+**支援格式**：`.md` 直接讀取。非 markdown 檔案會透過 [markitdown](https://github.com/microsoft/markitdown) 自動轉為 markdown 再處理。使用 `--no-convert` 可跳過自動轉換。
 
-**流程**：
-1. 讀取原始文件（若非 markdown 則先轉換）
-2. 讀取 `wiki/index.md` 與 `wiki/overview.md` 了解當前 wiki 狀態
-3. LLM 生成來源摘要頁 `wiki/sources/<slug>.md`（**自動標註領域標籤**）
-4. 建立／更新實體頁面（`entities/`）、概念頁面（`concepts/`）、作者頁面（`authors/`）、辯論頁面（`debates/`）
-5. 更新相關頁面的 `related:` 欄位
-6. 更新 `wiki/index.md`、`wiki/overview.md`、`wiki/log.md`
-7. 輸出變更摘要（含斷鏈警告）
+### 統一的 3 層攝入管道
+
+所有文件均使用相同的 3 層管道，無論大小：
+
+```
+原始文件
+    ↓ 語義切片（markdown 標頭 → 語義邊界 → 段落邊界，重疊 15%）
+L1：主頁面 (Master)
+    → wiki/sources/{slug}.md
+    → 全文概述 + 目錄 + 關鍵主題 + 導航樞紐
+    ↓ 逐段處理（每段獨立 LLM 呼叫，含母文檔上下文）
+L2：章節頁面 (Sections)
+    → wiki/sources/{slug}/01-name.md ... 0N-name.md
+    → 每段深度提取：摘要、關鍵主張、引文、概念、實體
+    ↓ 全段綜合（一次 LLM 呼叫）
+L3：概念合成 (Synthesis)
+    → wiki/concepts/X.md, entities/Y.md, authors/Z.md, debates/W.md
+    → 跨段概念提取、定義、實體、作者、辯論（含 ## 實踐方法）
+```
+
+**目錄結構範例**：
+```
+wiki/
+  sources/
+    周易.md                    # L1：主頁面
+    周易/                      # L2：章節目錄
+      01-shang-jing.md
+      02-xia-jing.md
+  concepts/
+    乾卦.md                    # L3：概念頁面（跨段合成）
+    ...
+```
+
+**特性**：
+- 語義切片：Trigram 相似度檢測主題變化點作為自然邊界，避免語境斷裂
+- 15% 重疊區間：相鄰切片保留上下文，防止關鍵資訊在邊界處遺失
+- 母文檔上下文：L2 章節處理時包含 L1 主頁面的 Overview 作為母文檔背景（Parent Document Retrieval）
+- 預設使用 qwen3（32K 上下文），超大提示自動升級至 DeepSeek Flash
+- `--flash` 可強制所有層級使用 Flash
+
+**LLM 後端**：預設 qwen3（免費）；`--flash` 強制 DeepSeek v4 flash；若 qwen3 無法連接則自動切換至 Flash。
 
 **參數**：
 - `--flash` — 使用 DeepSeek v4 flash
@@ -380,11 +439,12 @@ last_updated: YYYY-MM-DD
 
 觸發方式：`query: <question>` 或 `python src/query.py "<question>"`
 
-**流程**（三層導航串聯）：
+**流程**（四層導航串聯）：
 
-1. **識別集群**：從 `wiki/index.md` 找出問題所屬的概念集群
-2. **讀取綜合頁面**：若該集群存在綜合頁面（`syntheses/`），優先讀取
-3. **跟隨相關欄位**：使用 `related:` 欄位導航到相鄰頁面
+1. **識別領域**：從 `wiki/index.md`（L0 主中心）找出問題所屬的領域
+2. **載入領域索引**：讀取 `wiki/domains/{domain}.md`（L1）找出相關頁面
+3. **讀取綜合頁面**：若該領域存在綜合頁面（`syntheses/`），優先讀取
+4. **跟隨相關欄位**：使用 `related:` 欄位導航到相鄰頁面
 4. 若頁面不足，自動掃描 `raw/` 中檔名匹配的原始文件 → **自動攝入**後重新查詢
 5. 再掃描 `sources/` 中內容匹配的來源頁面 → 加入上下文
 6. LLM 優化搜索查詢語句
@@ -406,8 +466,9 @@ last_updated: YYYY-MM-DD
 
 **純結構檢查 — 不呼叫 LLM**：
 - **空／樁檔案**：無實質內容的頁面
-- **索引同步**：`index.md` 與實際檔案是否一致
-- **日誌覆蓋**：來源頁面是否缺少 ingest 日誌
+- **索引同步**：`index.md` 與 `domains/*.md` 與實際檔案是否一致（多檔案驗證）
+- **日誌覆蓋**：來源頁面是否缺少 ingest 日誌（含子目錄掃描）
+- **層級結構**：主頁面 TOC 與章節檔案是否一致、章節頁面是否鏈接回主頁面、孤立章節目錄
 
 **參數**：
 - `--save` — 儲存至 `wiki/health-report.md`
@@ -436,10 +497,14 @@ last_updated: YYYY-MM-DD
 - **脆弱橋樑**：社群間單一邊連接
 - **孤立社群**：無對外連接的頁面群
 
+**3 層結構檢查**（自動，無需 `--refinement`）：
+- **章節樁**：章節頁面內容過少（< 300 字）或缺少摘要/主張章節
+- **層級覆蓋**：主頁面 TOC 斷鏈（L1→L2）、章節頁面缺少概念鏈接（L2→L3）、章節頁面未被概念頁引用（L3→L2）
+
 **煉化專用檢查**（由 `lint --refinement` 觸發）：
-- **萃取完整性**：`raw/` 中的文件是否都有對應的 `sources/` 頁面？
+- **萃取完整性**：`raw/` 中的文件是否都有對應的 `sources/` 頁面（支援 `sources/{slug}/` 子目錄）？
 - **提煉覆蓋率**：被 3+ 個來源提及的概念是否都有獨立頁面？
-- **合成必要性**：是否有集群達到 4+ 來源但尚未創建綜合頁面？
+- **合成必要性**：是否有集群達到 4+ 來源但尚未創建綜合頁面（含章節頁面）？
 - **定義清晰度**：概念頁面的「定義」章節是否過短（< 50 字）或過於抽象？
 - **實踐方法缺失**：概念頁面是否缺少「實踐方法」章節？
 - **綜合過時**：綜合頁面引用來源中有新攝入的來源未被納入。
@@ -459,7 +524,7 @@ last_updated: YYYY-MM-DD
 | LLM 呼叫 | 無 | 有（語義分析） |
 | 成本 | 免費 | 消耗 token |
 | 頻率 | 每次會話 | 每 10–15 次 ingest |
-| 檢查 | 空檔案、索引、日誌 | 孤立頁、斷鏈、矛盾、缺口、圖片 |
+| 檢查 | 空檔案、索引、日誌、3 層結構 | 孤立頁、斷鏈、矛盾、缺口、圖片、章節樁、層級覆蓋 |
 | 工具 | `src/health.py` | `src/lint.py` |
 | 執行順序 | 優先（pre‑flight） | 健康檢查通過之後 |
 
@@ -517,10 +582,117 @@ python src/daemon.py logs      # 即時查看日誌
 守護行程每 24 小時執行一次 `maintain.py --auto`（一般日 health + index + graph，週日含 lint）。
 守護行程每日 03:00 執行 `refinement_loop.py --cycles 1 --flash`，進行煉化迴圈（萃取 _staging/ 新檔 → 補概念頁 → 補綜合頁）。
 守護行程每日 07:00 執行 `scrape_finance.py --swot`，根據過去 24 小時財經新聞進行 SWOT 分析（強弱危機分析），存入 `outputs/reports/finance-swot/`。
+守護行程每日 08:00 執行 `scrape_finance.py --recommend --qimen`，產生股票買入／賣出／持倉推薦（馬爾可夫鏈 + 張量運算），並附奇門遁甲交叉驗證，存入 `outputs/reports/stock-recommendations/`。
+守護行程每日 08:05 執行 `scrape_finance.py --qimen`，獨立產出奇門遁甲市場評估報告，存入 `outputs/reports/qimen-market/`。
+守護行程每週六／日 10:00 執行 `scrape_finance.py --weekend`，進行週末策略回顧：回顧本週股票表現、以長期馬爾可夫鏈（120 日）調整下週策略，並由 LLM 綜合奇門遁甲信號與量化信號提出建議。
+守護行程每日 16:30（僅交易日）執行 `scrape_finance.py --post-market`，以當日收盤價重新分析所有股票，並提取消息面／產業／政策信號進行參數校正，存入 `outputs/reports/post-market/` 及 `outputs/reports/stock-recommendations/`。
 此外，守護行程每小時自動執行 `scrape_finance.py --limit 5`（於每小時的 :30 執行），抓取新浪港股、21經濟網、證券時報等財經新聞，存入 `finance_report/YYYY-MM-DD/`。
 守護行程每 24 小時執行一次 `scrape_daily.py --report`，產生 10 篇跨領域研究摘要，存入 `outputs/reports/daily/`。
 守護行程每 6 小時執行一次事實核查掃描，自動驗證 `[待確認]` 頁面。
 守護行程每日執行一次清理，移除 raw/ 中過期的自動轉換檔案。
+
+---
+
+## 股票分析模組（Stock Analysis）
+
+### 概述
+
+整合量化分析（馬爾可夫鏈、張量運算、技術指標）與奇門遁甲時空模型，產生港股買入／賣出／持倉建議，並在週末進行策略回顧與調整。
+
+### 股票池（預設 13 隻港股）
+
+| 股票 | 代號 | 行業 | 奇門五行 |
+|------|------|------|----------|
+| 中芯國際 | 0981.HK | 半導體 | 金 |
+| 國藥控股 | 1099.HK | 醫藥 | 水 |
+| 阿里巴巴-W | 9988.HK | 科技 | 木 |
+| 騰訊控股 | 0700.HK | 科技 | 水 |
+| 美團-W | 3690.HK | 科技 | 木 |
+| 比亞迪股份 | 1211.HK | 新能源 | 火 |
+| 小米集團-W | 1810.HK | 科技 | 火 |
+| 快手-W | 1024.HK | 科技 | 土 |
+| 京東集團-SW | 9618.HK | 科技 | 土 |
+| 網易-S | 9999.HK | 科技 | 土 |
+| 建設銀行 | 0939.HK | 銀行 | 土 |
+| 銀河娛樂 | 0027.HK | 博彩 | 火 |
+| 中國南方航空股份 | 1055.HK | 航空 | 金 |
+
+### 分析引擎
+
+#### 馬爾可夫鏈（Markov Chain）
+
+- **狀態空間**：漲／跌／平（閾值 ±0.5%），或 5 態（大漲／小漲／平／小跌／大跌）
+- **轉移概率矩陣**：基於 120 日歷史日收益率，Laplace 平滑（α=0.1）
+- **穩態分佈**：矩陣冪迭代求特徵向量
+- **預測**：當前狀態 → 最大概率下一個狀態
+
+#### 張量運算（Tensor Computation）
+
+- **6 維特徵張量**：價格動量、成交量比率、波動率、高低價差、5 日趨勢、14 日 RSI
+- **SVD 低秩分解**：truncated rank-2 近似
+- **異常檢測**：重構誤差 → 偏離均值倍數 → 異常分數（0–5）
+- **趨勢強度**：第一主成分解釋方差比
+- **成交量信號**：近 5 日 vs 30 日均量
+
+#### 技術指標評分
+
+- 均線交叉（MA5 vs MA20 vs MA50）— 權重 0.5
+- RSI 14 日 — 權重 0.3
+- MACD（EMA12 vs EMA26）— 權重 0.2
+- 布林帶位置 — 權重 0.2
+- **綜合評分**：−1（極空）到 +1（極多）
+
+### 奇門遁甲整合
+
+- **五行分類**：每隻股票歸入金／水／木／火／土
+- **日時生剋**：日干（投資者）vs 時干（市場）
+- **生門分析**：機會門所在宮位的星神組合
+- **值符趨勢**：主導星對市場的影響方向
+- **交叉驗證表**：量化建議 vs 奇門建議 → ✓（一致）／△（部分一致）／✗（矛盾）
+
+### 使用方式
+
+```bash
+# 股票推薦
+python src/scrape_finance.py --recommend
+
+# 股票推薦 + 奇門遁甲交叉驗證
+python src/scrape_finance.py --recommend --qimen
+
+# 指定股票（支援部分庫內名稱）
+python src/scrape_finance.py --recommend --qimen --stocks 中芯國際 國藥控股 阿里巴巴-W
+
+# 週末策略回顧（強制模式：非週末亦可執行）
+python src/scrape_finance.py --weekend --force-weekend
+
+# 全管線（爬取 + SWOT + 推薦 + 奇門遁甲）
+python src/scrape_finance.py --all
+
+# 收盤後更新（收盤價 + 消息面 + 產業 + 政策校正）
+python src/scrape_finance.py --post-market
+
+# 全管線跳過特定步驟
+python src/scrape_finance.py --all --no-swot --no-qimen
+```
+
+### 產出檔案
+
+| 目錄 | 說明 |
+|------|------|
+| `outputs/reports/stock-recommendations/YYYY-MM-DD.md` | 每日推薦報告（買入／賣出／持倉表格 + 詳細分析 + 奇門交叉驗證表） |
+| `outputs/reports/stock-recommendations/weekend-YYYY-MM-DD.md` | 週末回顧（本週表現 + 策略調整 + 馬爾可夫穩態 + LLM 策略建議） |
+| `outputs/reports/qimen-market/YYYY-MM-DD.md` | 奇門遁甲市場評估（排盤摘要 + 九宮詳情 + 五行股票建議） |
+| `outputs/reports/post-market/YYYY-MM-DD.md` | 收盤後報告（收盤價 + 消息面／產業／政策信號校正 + 重新推薦） |
+
+### 週末回顧模式
+
+觸發條件：週六或週日（或 `--force-weekend`）。
+
+流程：
+1. 奇門遁甲週末排盤 → 五行行業信號
+2. 所有股票 3 個月歷史數據 → 長期馬爾可夫鏈
+3. 統計本週回報（vs 5 日前）
+4. LLM 綜合奇門信號 + 量化信號 → 下週策略建議（進攻／防守／觀望 + 板塊 + 個股調整）
 
 ---
 
@@ -643,26 +815,17 @@ python src/daemon.py logs      # 即時查看日誌
 ## Overview
 - [Overview](overview.md) — 跨領域綜合摘要
 
-## Concept Clusters
+## Domain Indexes
 
-### 中醫基礎理論
-核心頁面：[陰陽](concepts/陰陽.md) [五行](concepts/五行.md)
-綜合頁面：無
-關鍵作者：[張仲景](authors/張仲景.md)
+| Domain | Pages | Index |
+|--------|-------|-------|
+| 中醫學 | 186 | [中醫學](domains/中醫學.md) |
+| 易經 | 42 | [易經](domains/易經.md) |
+| 一般 | 155 | [一般](domains/一般.md) |
 
-### 易經哲學
-核心頁面：[六十四卦](concepts/六十四卦.md) [乾卦](concepts/乾卦.md)
-綜合頁面：無
-關鍵作者：無
-
-## Sources
-- [周易](sources/zhouyi.md) — 關於宇宙變化和修身養性的經典
-
-## Entities
-- [孫悟空](entities/孫悟空.md) — 西遊記主角
-
-## Syntheses
-- [百合病](syntheses/百合病.md) — 金匮要略，熱病後百脈受病
+## Concept Clusters (cross-domain)
+### 中醫基礎理論 → 核心: [[陰陽]], [[五行]], [[臟腑]], [[辨證論治]]
+### 易經哲學 → 核心: [[六十四卦]], [[乾卦]], [[坤卦]], [[繫辭傳]]
 ```
 
 ---
@@ -673,7 +836,7 @@ python src/daemon.py logs      # 即時查看日誌
 
 `## [YYYY-MM-DD] <操作> | <標題>`
 
-操作類型：`ingest`, `query`, `concept`, `author`, `debate`, `synthesis`, `fix`, `lint`, `graph`, `report`, `index`
+操作類型：`ingest`, `ingest (deep L1)`, `ingest (deep L3)`, `query`, `concept`, `author`, `debate`, `synthesis`, `fix`, `lint`, `graph`, `report`, `index`
 
 ---
 
@@ -701,8 +864,8 @@ python src/daemon.py logs      # 即時查看日誌
 
 ## 已知問題
 
-- **繁簡轉換**：所有產出管道已統一使用 OpenCC `s2tw` 強制轉換為正體中文。覆蓋範圍：`ingest.py`（所有頁面內容）、`query.py`（LLM 回答）、`lint.py`（審計報告）、`scrape_daily.py`（每日研究摘要）、`scrape_finance.py`（SWOT 分析 + 文章內文）、`graph.py`（圖譜報告 + 推論描述）、`tools/heal.py`（實體頁面）。另在 prompt 層級加上「Write in Traditional Chinese (繁體中文)」指令，形成雙重保障。
-- **大型檔案**：原始文件超過 8K 字元時會自動截斷（可透過 `--flash` 使用 1M 上下文的 DeepSeek 解決）。
+- **繁簡轉換**：所有產出管道已統一使用 OpenCC `s2tw` 強制轉換為正體中文。覆蓋範圍：`ingest.py`（所有頁面內容）、`query.py`（LLM 回答）、`lint.py`（審計報告）、`scrape_daily.py`（每日研究摘要）、`scrape_finance.py`（SWOT 分析 + 文章內文 + 股票推薦 + 奇門遁甲報告）、`qimen.py`（排盤輸出）、`stock_analysis.py`（推薦報告）、`graph.py`（圖譜報告 + 推論描述）、`tools/heal.py`（實體頁面）。另在 prompt 層級加上「Write in Traditional Chinese (繁體中文)」指令，形成雙重保障。
+- **大型檔案**：所有文件統一使用 3 層攝入管道（L1 主頁面 → L2 章節頁面 → L3 概念合成），不再截斷。
 - **`.ipynb_checkpoints`**：Jupyter 自動產生的檢查點檔案會被所有腳本忽略。
 - **圖譜推論**：使用 qwen3 時的語義推論較慢（推理模型特性），建議使用 `--flash` 加速。
 
