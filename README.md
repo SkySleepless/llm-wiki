@@ -23,7 +23,7 @@ pip install -r requirements.txt
 
 # 2. 安裝 opencode
 # macOS / Linux:
-curl -fsSL https://anomalyco.github.io/opencode/install.sh | bash
+curl -fsSL https://opencode.ai/install | bash
 # 或透過 Homebrew:
 # brew install anomalyco/tap/opencode
 
